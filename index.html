@@ -174,6 +174,7 @@ tbody td{padding:12px 14px;font-size:.87rem;vertical-align:middle}
   <h1>🏆 Ranking de Candidatos</h1>
   <div class="topbar-right">
     <span id="arquivo-nome" style="font-size:.78rem;opacity:.7"></span>
+    <button class="btn-ghost" id="btn-atualizar" style="display:none" onclick="atualizarDados()">🔄 Atualizar dados</button>
     <button class="btn-ghost" id="btn-trocar" style="display:none" onclick="trocarArquivo()">Trocar arquivo</button>
   </div>
 </header>
@@ -187,6 +188,7 @@ tbody td{padding:12px 14px;font-size:.87rem;vertical-align:middle}
     <button class="btn-primary" onclick="event.stopPropagation();document.getElementById('file-input').click()">Selecionar arquivo JSON</button>
   </div>
   <input type="file" id="file-input" accept=".json">
+  <div id="upload-status" style="font-size:.82rem;color:var(--text2);min-height:20px;text-align:center"></div>
   <p style="font-size:.78rem;color:var(--text2)">O arquivo é processado localmente — nenhum dado é enviado a servidores externos.</p>
 </div>
 
@@ -339,7 +341,34 @@ function atualizarContadorTokens(tokensUsados, nomeCandidato) {
   console.log(`[Tokens] ${nomeCandidato}: ${tokensUsados} tokens | Total sessão: ${tokensSessao}`);
 } // texto extraído da descrição da vaga
 
-/* ── UPLOAD ─────────────────────────────────────────────────────────────── */
+/* ── URL DO JSON NO GITHUB PAGES ─────────────────────────────────────────────
+   Após hospedar no GitHub Pages, cole aqui a URL do arquivo JSON.
+   Exemplo: 'https://seu-usuario.github.io/ranking-rh-gentil/curriculos_vagas_2026.json'
+   Deixe vazio ('') para usar apenas o upload manual.
+────────────────────────────────────────────────────────────────────────────── */
+const JSON_URL_GITHUB = 'https://matheusrodriguesgn.github.io/analise-curriculos/curriculos_vagas_2026.json';
+
+async function tentarCarregarDoGitHub() {
+  if (!JSON_URL_GITHUB) return false;
+  try {
+    document.getElementById('upload-status').textContent = '⏳ Carregando base de dados...';
+    const resp = await fetch(JSON_URL_GITHUB + '?t=' + Date.now()); // cache-bust
+    if (!resp.ok) throw new Error('Arquivo não encontrado');
+    const data = await resp.json();
+    if (!Array.isArray(data)) throw new Error('Formato inválido');
+    dados = data;
+    document.getElementById('arquivo-nome').textContent = JSON_URL_GITHUB.split('/').pop();
+    document.getElementById('btn-trocar').style.display = 'none';
+    document.getElementById('btn-atualizar').style.display = '';
+    document.getElementById('upload-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    renderVagas();
+    return true;
+  } catch(e) {
+    document.getElementById('upload-status').textContent = '⚠️ Não foi possível carregar automaticamente. Faça o upload manual.';
+    return false;
+  }
+}
 const dropZone = document.getElementById('drop-zone');
 const fileInput = document.getElementById('file-input');
 dropZone.addEventListener('click', () => fileInput.click());
@@ -347,6 +376,21 @@ dropZone.addEventListener('dragover',  e => { e.preventDefault(); dropZone.class
 dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
 dropZone.addEventListener('drop', e => { e.preventDefault(); dropZone.classList.remove('drag'); if(e.dataTransfer.files[0]) carregarArquivo(e.dataTransfer.files[0]); });
 fileInput.addEventListener('change', e => { if(e.target.files[0]) carregarArquivo(e.target.files[0]); });
+
+// Tenta carregar do GitHub automaticamente ao abrir a página
+window.addEventListener('DOMContentLoaded', () => {
+  if (JSON_URL_GITHUB) tentarCarregarDoGitHub();
+});
+
+async function atualizarDados() {
+  if (!JSON_URL_GITHUB) return;
+  const ok = await tentarCarregarDoGitHub();
+  if (ok) {
+    document.getElementById('cand-view').style.display = 'none';
+    document.getElementById('vagas-view').style.display = 'block';
+    vagaAtual = null; rankingGerado = false;
+  }
+}
 
 function carregarArquivo(file) {
   const reader = new FileReader();
