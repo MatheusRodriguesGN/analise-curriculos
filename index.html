@@ -609,12 +609,7 @@ Responda APENAS com JSON válido, sem markdown:
     "requisitos": [{"requisito":"<texto>","atende":<true/false>,"justificativa":"<1 frase curta>"}],
     "resumo": "<2 frases sobre alinhamento geral>"
   },
-  "senioridade": {
-    "nota": <0-100>,
-    "anos_relevantes": <número>,
-    "experiencias_relevantes": [{"cargo":"<cargo>","empresa":"<empresa>","anos":<n>,"relevancia":"<1 frase>"}],
-    "justificativa": "<1 frase>"
-  },
+  "experiencias_relevantes": ["<cargo @ empresa>", "<cargo @ empresa>"],
   "formacao": {
     "nota": <0-100>,
     "nivel": "<Graduação|MBA|Pós-Graduação|Mestrado|Não informado>",
@@ -682,12 +677,13 @@ Responda APENAS com JSON válido, sem markdown:
         if (tokensUsados2 > 0) atualizarContadorTokens(tokensUsados2, nomeCand2);
         console.log(`[Groq] ${nomeCand2} → prompt: ${data2.usage?.prompt_tokens} | completion: ${data2.usage?.completion_tokens} | total: ${tokensUsados2}`);
         const resultado2 = JSON.parse(txt2.replace(/```json|```/g,'').trim());
+        resultado2.senioridade = calcularSenioridade(c, resultado2.experiencias_relevantes || []);
         const p2 = configPesos;
         resultado2.total = Math.round(
-          resultado2.aderencia.nota   * (p2.aderencia   / 100) +
-          resultado2.senioridade.nota * (p2.senioridade  / 100) +
-          resultado2.formacao.nota    * (p2.formacao     / 100) +
-          100                         * (p2.profiler     / 100)
+          resultado2.aderencia.nota    * (p2.aderencia   / 100) +
+          resultado2.senioridade.nota  * (p2.senioridade  / 100) +
+          resultado2.formacao.nota     * (p2.formacao     / 100) +
+          100                          * (p2.profiler     / 100)
         );
         cacheAnalises[chaveCache] = resultado2;
         return resultado2;
@@ -708,13 +704,16 @@ Responda APENAS com JSON válido, sem markdown:
     const json = txt.replace(/```json|```/g,'').trim();
     const resultado = JSON.parse(json);
 
+    // Calcula senioridade pelas datas reais — não confia no modelo para isso
+    resultado.senioridade = calcularSenioridade(c, resultado.experiencias_relevantes || []);
+
     // Aplica pesos configurados pelo usuário na nota final
     const p = configPesos;
     const total = Math.round(
-      resultado.aderencia.nota   * (p.aderencia   / 100) +
-      resultado.senioridade.nota * (p.senioridade  / 100) +
-      resultado.formacao.nota    * (p.formacao     / 100) +
-      100                        * (p.profiler     / 100)   // profiler sempre 100
+      resultado.aderencia.nota    * (p.aderencia   / 100) +
+      resultado.senioridade.nota  * (p.senioridade  / 100) +
+      resultado.formacao.nota     * (p.formacao     / 100) +
+      100                         * (p.profiler     / 100)
     );
     resultado.total = total;
 
@@ -724,6 +723,106 @@ Responda APENAS com JSON válido, sem markdown:
     console.error('[Groq] Erro na análise:', err);
     return { erro: err.message, total: 0 };
   }
+}
+
+// Calcula senioridade com base nas datas reais do JSON
+// O modelo identifica quais experiências são relevantes (por cargo/empresa)
+// O código calcula os meses exatos a partir das datas
+function calcularSenioridade(c, expRelevantesNomes) {
+  const exps = c.experiencias_profissionais || [];
+  let totalMeses = 0;
+  const expRelevantesDetalhes = [];
+
+  exps.forEach(exp => {
+    const cargo   = (exp.position || '').toLowerCase();
+    const empresa = (exp.company  || '').toLowerCase();
+    const chave   = `${cargo} @ ${empresa}`;
+
+    // Verifica se o modelo marcou essa experiência como relevante
+    const relevante = !expRelevantesNomes || expRelevantesNomes.length === 0 ||
+      expRelevantesNomes.some(nome => {
+        const n = nome.toLowerCase();
+        return n.includes(cargo.slice(0,10)) || n.includes(empresa.slice(0,10)) ||
+               cargo.includes(n.split('@')[0]?.trim().slice(0,10));
+      });
+
+    if (!relevante) return;
+
+    // Calcula meses exatos a partir das datas (formato MM/YYYY ou YYYY)
+    try {
+      const parseData = (str) => {
+        if (!str) return null;
+        const partes = str.split('/');
+        if (partes.length === 2) return new Date(parseInt(partes[1]), parseInt(partes[0]) - 1, 1);
+        if (partes.length === 1 && str.length === 4) return new Date(parseInt(str), 0, 1);
+        // Tenta outros formatos como "01/2020" ou timestamps
+        const d = new Date(str);
+        return isNaN(d) ? null : d;
+      };
+
+      const inicio = parseData(exp.startDate);
+      const fim    = exp.endDate ? parseData(exp.endDate) : new Date();
+
+      if (!inicio || isNaN(inicio)) return;
+
+      const meses = Math.max(0,
+        (fim.getFullYear() - inicio.getFullYear()) * 12 +
+        (fim.getMonth() - inicio.getMonth())
+      );
+
+      if (meses > 0) {
+        totalMeses += meses;
+        expRelevantesDetalhes.push({
+          cargo:     exp.position || '',
+          empresa:   exp.company  || '',
+          meses,
+          anos:      parseFloat((meses / 12).toFixed(1)),
+          periodo:   `${exp.startDate||''} – ${exp.endDate||'atual'}`
+        });
+      }
+    } catch(_) {}
+  });
+
+  const totalAnos = totalMeses / 12;
+
+  // Converte anos em nota — penaliza experiências muito curtas por experiência
+  // Calcula média de meses por experiência para detectar instabilidade
+  const mediasMeses = expRelevantesDetalhes.length > 0
+    ? totalMeses / expRelevantesDetalhes.length
+    : 0;
+
+  // Penalidade por experiências muito curtas (média < 6 meses por cargo)
+  const fatorEstabilidade = mediasMeses >= 12 ? 1.0
+    : mediasMeses >= 6  ? 0.8
+    : mediasMeses >= 3  ? 0.6
+    : 0.4;
+
+  let nota;
+  if      (totalAnos >= 15) nota = 100;
+  else if (totalAnos >= 10) nota = 85;
+  else if (totalAnos >= 7)  nota = 70;
+  else if (totalAnos >= 5)  nota = 55;
+  else if (totalAnos >= 3)  nota = 38;
+  else if (totalAnos >= 1)  nota = 22;
+  else if (totalAnos >= 0.5)nota = 12;
+  else                      nota = 5;
+
+  // Aplica fator de estabilidade
+  nota = Math.round(nota * fatorEstabilidade);
+
+  const justificativa = expRelevantesDetalhes.length > 0
+    ? `${totalAnos.toFixed(1)} anos relevantes em ${expRelevantesDetalhes.length} experiência(s). Média de ${mediasMeses.toFixed(0)} meses por cargo.`
+    : 'Nenhuma experiência relevante identificada para os requisitos definidos.';
+
+  return {
+    nota,
+    anos_relevantes: parseFloat(totalAnos.toFixed(1)),
+    meses_totais: totalMeses,
+    media_meses_por_exp: parseFloat(mediasMeses.toFixed(1)),
+    fator_estabilidade: fatorEstabilidade,
+    experiencias_relevantes: expRelevantesDetalhes,
+    justificativa
+  };
 }
 
 function aplicarConfig() {
@@ -977,89 +1076,6 @@ function textoCandidato(c) {
   ].join(' '));
 }
 
-function calcularScore(c) {
-  const exps = c.experiencias_profissionais || [];
-  const fors = c.formacao_academica || [];
-  const p    = configPesos;
-  const txtExp = norm(exps.map(e=>(e.position||'')+' '+(e.company||'')+' '+(e.activitiesDescription||'')).join(' '));
-  const txtEdu = norm(fors.map(f=>(f.course||'')+' '+(f.institution||'')+' '+(f.grade||'')).join(' '));
-  const txtTudo = txtExp + ' ' + txtEdu;
-
-  const reqs = extrairRequisitos(configExpectativa);
-  const temExpectativa = reqs.length > 0;
-
-  // ── 1. ADERÊNCIA (40%) ───────────────────────────────────────────────────
-  // Quantos requisitos do gestor o candidato atende no currículo completo
-  let ad = 50;
-  let detalheAd = { atendidos: [], naoAtendidos: [], semExpectativa: !temExpectativa };
-  if (temExpectativa) {
-    reqs.forEach(r => {
-      if (requisito_atendido(r, txtTudo)) detalheAd.atendidos.push(r);
-      else detalheAd.naoAtendidos.push(r);
-    });
-    ad = Math.round((detalheAd.atendidos.length / reqs.length) * 100);
-  }
-
-  // ── 2. SENIORIDADE (30%) ─────────────────────────────────────────────────
-  // Anos de experiência em funções relevantes aos requisitos do gestor
-  // Não depende de como o candidato escreveu — depende das datas e cargos
-  let sen = 50;
-  let detalheSen = { expsRelevantes: [], anosTotal: 0, semExpectativa: !temExpectativa };
-  if (temExpectativa) {
-    const frasesBuscaSen = reqs.map(r => extrairConceito(r)).filter(f => f.length > 1);
-    const todasFrasesSen = frasesBuscaSen.flatMap(f => [f, ...buscarEquivalentes(f)]);
-    let anosRelevantes = 0;
-    exps.forEach(exp => {
-      const expTxt = norm((exp.position||'')+' '+(exp.activitiesDescription||'')+' '+(exp.company||''));
-      const fraseAchada = todasFrasesSen.find(frase => fraseNoTexto(frase, expTxt));
-      if (fraseAchada) {
-        try {
-          const sy = exp.startDate ? parseInt(exp.startDate.slice(-4)) : 0;
-          const ey = exp.endDate   ? parseInt(exp.endDate.slice(-4))   : 2026;
-          const anos = sy > 0 ? Math.max(0, ey - sy) : 0;
-          anosRelevantes += anos;
-          detalheSen.expsRelevantes.push({ cargo: exp.position||'', empresa: exp.company||'', anos, fraseAchada });
-        } catch(_) {}
-      }
-    });
-    detalheSen.anosTotal = Math.min(anosRelevantes, 20);
-    if      (detalheSen.anosTotal >= 15) sen = 100;
-    else if (detalheSen.anosTotal >= 10) sen = 85;
-    else if (detalheSen.anosTotal >= 7)  sen = 70;
-    else if (detalheSen.anosTotal >= 5)  sen = 55;
-    else if (detalheSen.anosTotal >= 3)  sen = 38;
-    else if (detalheSen.anosTotal >= 1)  sen = 22;
-    else                                 sen = 5;
-  }
-
-  // ── 3. FORMAÇÃO (20%) ────────────────────────────────────────────────────
-  // Formação acadêmica conectada aos requisitos + bônus por nível
-  let f = 50;
-  let detalheF = { encontrados: [], nivelFormacao: '', bonus: 0, semExpectativa: !temExpectativa };
-  if (temExpectativa) {
-    const frasesBuscaF = reqs.map(r => ({ req: r, frase: extrairConceito(r) })).filter(x => x.frase.length > 1);
-    frasesBuscaF.forEach(({ req, frase }) => {
-      const todasF = [frase, ...buscarEquivalentes(frase)];
-      const achou = todasF.find(fr => fraseNoTexto(fr, txtEdu));
-      if (achou) detalheF.encontrados.push({ req, fraseAchada: achou });
-    });
-    f = Math.min(Math.round((detalheF.encontrados.length / Math.max(frasesBuscaF.length, 1)) * 100), 80);
-    if (/mestrado|doutorado/.test(txtEdu))                             { detalheF.nivelFormacao = 'Mestrado/Doutorado'; detalheF.bonus = 25; f = Math.min(f+25, 100); }
-    else if (/mba|pos.graduacao|pos.grad|especializacao/.test(txtEdu)) { detalheF.nivelFormacao = 'MBA/Pós-Graduação';  detalheF.bonus = 18; f = Math.min(f+18, 100); }
-    else if (/superior completo|graduacao/.test(txtEdu))               { detalheF.nivelFormacao = 'Graduação';          detalheF.bonus = 10; f = Math.min(f+10, 100); }
-  }
-
-  // ── 4. PROFILER (10%) ─────────────────────────────────────────────────────
-  // Sempre 100 — campo ausente na exportação atual
-  const ps = 100;
-
-  const total = ad*(p.aderencia/100) + sen*(p.senioridade/100) + f*(p.formacao/100) + ps*(p.profiler/100);
-  return {
-    total: Math.round(total),
-    ad, sen, f, ps,
-    detalheAd, detalheSen, detalheF,
-  };
-}
 
 /* ── TABELA COM ANÁLISE IA ───────────────────────────────────────────────── */
 function nivelBadge(pts) {
@@ -1179,8 +1195,12 @@ function abrirFichaIA(idxDados) {
   const criteriosRows = [
     { label:'Aderência ao gestor',      nota: analise.aderencia?.nota||0,   peso: p.aderencia,
       det: analise.aderencia?.resumo || '' },
-    { label:'Senioridade',              nota: analise.senioridade?.nota||0,  peso: p.senioridade,
-      det: analise.senioridade?.justificativa || '' },
+    { label:'Senioridade',
+      nota: analise.senioridade?.nota||0,
+      peso: p.senioridade,
+      det: analise.senioridade?.justificativa
+        ? `${analise.senioridade.justificativa}${analise.senioridade.fator_estabilidade < 1 ? ` Fator de estabilidade aplicado: ${Math.round((analise.senioridade.fator_estabilidade||1)*100)}% (média de ${analise.senioridade.media_meses_por_exp||0} meses por cargo).` : ''}`
+        : '' },
     { label:'Formação e certificações', nota: analise.formacao?.nota||0,     peso: p.formacao,
       det: analise.formacao?.justificativa || '' },
     { label:'Fit Profiler',             nota: 100,                           peso: p.profiler,
@@ -1209,10 +1229,24 @@ function abrirFichaIA(idxDados) {
 
   // Senioridade — experiências relevantes
   const expRelHTML = (analise.senioridade?.experiencias_relevantes||[]).map(e => `
-    <div style="font-size:.82rem;margin-bottom:6px;padding:6px 10px;background:var(--bg);border-radius:6px;border-left:3px solid var(--verde2)">
+    <div style="font-size:.82rem;margin-bottom:6px;padding:8px 12px;background:var(--bg);border-radius:6px;border-left:3px solid var(--verde2)">
       <div style="font-weight:600;color:var(--prim)">${escHTML(e.cargo)} @ ${escHTML(e.empresa)}</div>
-      <div style="color:var(--cinza);font-size:.76rem;margin-top:2px">${e.anos} ano(s) relevante(s) · ${escHTML(e.relevancia||'')}</div>
-    </div>`).join('') || '<div style="font-size:.82rem;color:var(--cinza)">Nenhuma experiência relevante identificada.</div>';
+      <div style="color:var(--cinza);font-size:.76rem;margin-top:2px">
+        ${e.periodo ? escHTML(e.periodo)+' · ' : ''}
+        <strong>${e.meses||0} meses</strong> (${e.anos||0} ano${e.anos!==1?'s':''})
+      </div>
+    </div>`).join('') ||
+    '<div style="font-size:.82rem;color:var(--cinza)">Nenhuma experiência relevante identificada.</div>';
+
+  const senResHTML = analise.senioridade ? `
+    <div style="margin-top:8px;padding:8px 12px;background:var(--prim-lite);border-radius:6px;font-size:.82rem">
+      <div style="display:flex;gap:20px;flex-wrap:wrap">
+        <span>⏱ Total: <strong>${analise.senioridade.anos_relevantes||0} anos (${analise.senioridade.meses_totais||0} meses)</strong></span>
+        <span>📊 Média por cargo: <strong>${analise.senioridade.media_meses_por_exp||0} meses</strong></span>
+        <span>⚖️ Fator estabilidade: <strong>${Math.round((analise.senioridade.fator_estabilidade||1)*100)}%</strong></span>
+        <span style="color:var(--prim);font-weight:700">Nota: ${analise.senioridade.nota||0}/100</span>
+      </div>
+    </div>` : '';
 
   // Alerta impedimento
   let alertaHTML = '';
@@ -1267,11 +1301,9 @@ function abrirFichaIA(idxDados) {
     </div>` : ''}
 
     <div class="ficha-section">
-      <h4>Senioridade — Experiências relevantes para a vaga</h4>
+      <h4>Senioridade — Experiências relevantes para a vaga <span style="font-size:.72rem;font-weight:400;color:var(--cinza)">(calculado pelas datas reais)</span></h4>
       ${expRelHTML}
-      <div style="margin-top:8px;font-size:.82rem;font-weight:600;color:var(--prim)">
-        Total mapeado: ${analise.senioridade?.anos_relevantes||0} ano(s) relevante(s)
-      </div>
+      ${senResHTML}
     </div>
 
     ${expsHTML ? `<div class="ficha-section"><h4>Experiências profissionais</h4>${expsHTML}</div>` : ''}
