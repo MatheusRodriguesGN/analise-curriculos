@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Ranking de Candidatos · RH</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 :root {
   --bg:#F0F2F7; --surface:#FFF; --border:#DDE1EC;
@@ -183,11 +184,11 @@ tbody td{padding:12px 14px;font-size:.87rem;vertical-align:middle}
   <div class="upload-box" id="drop-zone">
     <div class="upload-icon">📂</div>
     <h2>Carregar base de candidatos</h2>
-    <p>Arraste o arquivo JSON aqui<br>ou clique para selecionar</p>
+    <p>Arraste o arquivo JSON ou Excel (.xlsx) aqui<br>ou clique para selecionar</p>
     <br>
-    <button class="btn-primary" onclick="event.stopPropagation();document.getElementById('file-input').click()">Selecionar arquivo JSON</button>
+    <button class="btn-primary" onclick="event.stopPropagation();document.getElementById('file-input').click()">Selecionar arquivo</button>
   </div>
-  <input type="file" id="file-input" accept=".json">
+  <input type="file" id="file-input" accept=".json,.xlsx,.xls">
   <div id="upload-status" style="font-size:.82rem;color:var(--text2);min-height:20px;text-align:center"></div>
   <p style="font-size:.78rem;color:var(--text2)">O arquivo é processado localmente — nenhum dado é enviado a servidores externos.</p>
 </div>
@@ -341,23 +342,38 @@ function atualizarContadorTokens(tokensUsados, nomeCandidato) {
   console.log(`[Tokens] ${nomeCandidato}: ${tokensUsados} tokens | Total sessão: ${tokensSessao}`);
 } // texto extraído da descrição da vaga
 
-/* ── URL DO JSON NO GITHUB PAGES ─────────────────────────────────────────────
-   Após hospedar no GitHub Pages, cole aqui a URL do arquivo JSON.
-   Exemplo: 'https://seu-usuario.github.io/ranking-rh-gentil/curriculos_vagas_2026.json'
+/* ── URL DO ARQUIVO NO GITHUB PAGES ──────────────────────────────────────────
+   URL do arquivo Excel ou JSON hospedado no GitHub Pages.
    Deixe vazio ('') para usar apenas o upload manual.
 ────────────────────────────────────────────────────────────────────────────── */
-const JSON_URL_GITHUB = 'https://matheusrodriguesgn.github.io/analise-curriculos/curriculos_vagas_2026.json';
+const ARQUIVO_URL_GITHUB = 'https://matheusrodriguesgn.github.io/analise-curriculos/curriculos.xlsx';
 
 async function tentarCarregarDoGitHub() {
-  if (!JSON_URL_GITHUB) return false;
+  if (!ARQUIVO_URL_GITHUB) return false;
   try {
     document.getElementById('upload-status').textContent = '⏳ Carregando base de dados...';
-    const resp = await fetch(JSON_URL_GITHUB + '?t=' + Date.now()); // cache-bust
+    const resp = await fetch(ARQUIVO_URL_GITHUB + '?t=' + Date.now());
     if (!resp.ok) throw new Error('Arquivo não encontrado');
-    const data = await resp.json();
-    if (!Array.isArray(data)) throw new Error('Formato inválido');
-    dados = data;
-    document.getElementById('arquivo-nome').textContent = JSON_URL_GITHUB.split('/').pop();
+
+    const nomeArquivo = ARQUIVO_URL_GITHUB.split('/').pop().split('?')[0];
+    const ext = nomeArquivo.split('.').pop().toLowerCase();
+
+    let raw;
+    if (ext === 'xlsx' || ext === 'xls') {
+      const buffer = await resp.arrayBuffer();
+      const XLSX = window.XLSX;
+      if (!XLSX) throw new Error('Biblioteca Excel não carregada');
+      const wb  = XLSX.read(buffer, { type: 'array' });
+      const ws  = wb.Sheets[wb.SheetNames[0]];
+      raw = XLSX.utils.sheet_to_json(ws, { defval: '' });
+    } else {
+      raw = await resp.json();
+    }
+
+    dados = normalizarDados(raw);
+    if (!dados.length) throw new Error('Nenhum dado encontrado');
+
+    document.getElementById('arquivo-nome').textContent = nomeArquivo;
     document.getElementById('btn-trocar').style.display = 'none';
     document.getElementById('btn-atualizar').style.display = '';
     document.getElementById('upload-screen').style.display = 'none';
@@ -366,6 +382,7 @@ async function tentarCarregarDoGitHub() {
     return true;
   } catch(e) {
     document.getElementById('upload-status').textContent = '⚠️ Não foi possível carregar automaticamente. Faça o upload manual.';
+    console.error('Auto-load falhou:', e.message);
     return false;
   }
 }
@@ -379,11 +396,11 @@ fileInput.addEventListener('change', e => { if(e.target.files[0]) carregarArquiv
 
 // Tenta carregar do GitHub automaticamente ao abrir a página
 window.addEventListener('DOMContentLoaded', () => {
-  if (JSON_URL_GITHUB) tentarCarregarDoGitHub();
+  if (ARQUIVO_URL_GITHUB) tentarCarregarDoGitHub();
 });
 
 async function atualizarDados() {
-  if (!JSON_URL_GITHUB) return;
+  if (!ARQUIVO_URL_GITHUB) return;
   const ok = await tentarCarregarDoGitHub();
   if (ok) {
     document.getElementById('cand-view').style.display = 'none';
@@ -392,20 +409,105 @@ async function atualizarDados() {
   }
 }
 
+function normalizarDados(raw) {
+  // Detecta se é formato Excel (tem vaga_titulo) ou JSON Sólides (tem vaga.titulo)
+  if (!Array.isArray(raw)) return [];
+
+  // Formato Excel — linha plana com colunas vaga_*, nome_completo, etc.
+  if (raw.length > 0 && raw[0].vaga_titulo !== undefined) {
+    return raw.map(row => {
+      // Parse de experiências e formação (JSON strings no Excel)
+      let exps = [];
+      let fors = [];
+      try { exps = JSON.parse(row.experiencias_profissionais || '[]'); } catch(_) {}
+      try { fors = JSON.parse(row.formacao_academica || '[]'); } catch(_) {}
+
+      // Normaliza experiências para o formato interno
+      const expsNorm = exps.map(e => ({
+        position:              e.cargo || '',
+        company:               e.empresa || '',
+        startDate:             e.data_inicio || '',
+        endDate:               e.data_fim || '',
+        activitiesDescription: e.descricao_atividades || ''
+      }));
+
+      // Normaliza formação para o formato interno
+      const forsNorm = fors.map(f => ({
+        course:      f.curso || '',
+        institution: f.instituicao || '',
+        grade:       f.nivel || '',
+        endDate:     f.data_fim || ''
+      }));
+
+      return {
+        vaga: {
+          titulo:    row.vaga_titulo || row.vaga_cargo || '',
+          cargo:     row.vaga_cargo || '',
+          descricao: row.vaga_descricao || '',
+          empresa:   row.vaga_local || ''
+        },
+        candidato: {
+          id:                  String(row.candidato_id || row.cpf || row.email || Math.random()),
+          nome_completo:       row.nome_completo || '',
+          pretensao_salarial:  parseFloat(String(row.pretensao_salarial || '0').replace(/[^0-9,.]/g,'').replace(',','.')) || 0,
+        },
+        endereco: {
+          city: {
+            name:  row.endereco_cidade_nome || row.endereco_cidade || '',
+            state: { initials: row.endereco_uf_sigla || row.endereco_state_acronym || '' }
+          }
+        },
+        experiencias_profissionais: expsNorm,
+        formacao_academica:         forsNorm,
+        status_candidatura:         { desclassificado: row.desclassificado === 'Sim' || row.desclassificado === true }
+      };
+    });
+  }
+
+  // Formato JSON Sólides — já está no formato correto, retorna como está
+  return raw;
+}
+
 function carregarArquivo(file) {
-  const reader = new FileReader();
-  reader.onload = ev => {
-    try {
-      dados = JSON.parse(ev.target.result);
-      if (!Array.isArray(dados)) throw new Error();
-      document.getElementById('arquivo-nome').textContent = file.name;
-      document.getElementById('btn-trocar').style.display = '';
-      document.getElementById('upload-screen').style.display = 'none';
-      document.getElementById('app').style.display = 'block';
-      renderVagas();
-    } catch(e) { alert('Erro ao ler o arquivo JSON. Verifique o formato.'); }
-  };
-  reader.readAsText(file, 'UTF-8');
+  const ext = file.name.split('.').pop().toLowerCase();
+
+  if (ext === 'xlsx' || ext === 'xls') {
+    // Carrega Excel via SheetJS
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const XLSX = window.XLSX;
+        if (!XLSX) { alert('Biblioteca Excel não carregada. Use um arquivo JSON.'); return; }
+        const wb   = XLSX.read(ev.target.result, { type: 'array' });
+        const ws   = wb.Sheets[wb.SheetNames[0]];
+        const raw  = XLSX.utils.sheet_to_json(ws, { defval: '' });
+        dados = normalizarDados(raw);
+        if (!dados.length) throw new Error('Nenhum dado encontrado');
+        finalizarCarregamento(file.name);
+      } catch(e) { alert('Erro ao ler o arquivo Excel: ' + e.message); }
+    };
+    reader.readAsArrayBuffer(file);
+  } else {
+    // JSON
+    const reader = new FileReader();
+    reader.onload = ev => {
+      try {
+        const raw = JSON.parse(ev.target.result);
+        dados = normalizarDados(raw);
+        if (!dados.length) throw new Error();
+        finalizarCarregamento(file.name);
+      } catch(e) { alert('Erro ao ler o arquivo. Verifique o formato.'); }
+    };
+    reader.readAsText(file, 'UTF-8');
+  }
+}
+
+function finalizarCarregamento(nomeArquivo) {
+  document.getElementById('arquivo-nome').textContent = nomeArquivo;
+  document.getElementById('btn-trocar').style.display = '';
+  document.getElementById('upload-screen').style.display = 'none';
+  document.getElementById('app').style.display = 'block';
+  renderVagas();
 }
 
 function trocarArquivo() {
